@@ -1,3 +1,25 @@
+# Table of Contents
+- [1. Motivation](#1-motivation)
+- [2. Overview](#2-overview)
+- [3. Frontend Integration (Slang -> Moore)](#3-frontend-integration)
+- [4. Object Layout](#4-object-layout)
+- [5. Core Moore Operators](#5-core-moore-operators)
+- [6. SV-to-Moore Lowering Rules](#6-sv-to-moore-lowering-rules)
+- [7. Moore Lowering Example Sketch](#7-moore-lowering-example-sketch)
+- [8. Moore -> LLVM Lowering](#8-moore---llvm-lowering)
+- [9. Naming and Visibility](#9-naming-and-visibility)
+- [10. Object Lifetime and Memory Management](#10-object-lifetime-and-memory-management)
+- [11. Static Members and Initialization](#11-static-members-and-initialization)
+- [12. Class Tasks and Timing Semantics](#12-class-tasks-and-timing-semantics)
+- [13. Dynamic Type Operations](#13-dynamic-type-operations)
+- [14. VTable Construction and Inheritance](#14-vtable-construction-and-inheritance)
+  - [14.1 VTable Layout and RTTI Integration — Full Example](#141-vtable-layout-and-rtti-integration--full-example)
+- [15. Abstract Classes and Pure Virtual Methods](#15-abstract-classes-and-pure-virtual-methods)
+- [16. Type Parameters](#16-type-parameters)
+- [17. Future Work / Out of Scope](#17-future-work--out-of-scope)
+- [18. Summary](#18-summary)
+- [19. Additional Notes & Open Items](#19-additional-notes--open-items)
+
 # 1. Motivation
 
 SystemVerilog classes are fundamental for verification-oriented code (e.g., UVM, testbenches).[^8]
@@ -8,6 +30,7 @@ The goal is to introduce class support that:
 - Integrates cleanly with existing Moore concepts (`moore.read`, `moore.ref`, `moore.call`).
 - Lowers predictably to LLVM using heap-allocated `struct` objects and standard vtable dispatch.
 
+The implementation further tries to stick closely to standard C++ lowering conventions, as for example defined in [Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#member-pointers).
 This document defines class support according to *IEEE 1800-2023 § 8 “Classes”*[^8].
 
 Scope of this initial design:
@@ -32,7 +55,7 @@ The design extends the Moore dialect with:
 This enables lowering of typical SystemVerilog class features used in testbenches and UVM environments,
 including virtual functions and single inheritance.
 
-# 3. Frontend Integration (Slang → Moore)
+# 3. Frontend Integration
 
 ## 3.1 Class Metadata
 
@@ -368,12 +391,25 @@ Each vtable stores a type descriptor pointer, enabling O(1) dynamic type checks.
 
 # 14. VTable Construction and Inheritance
 
-Each class with virtual methods defines a vtable symbol[^8.14]:
+Each class with virtual methods defines a vtable symbol[^8.14] containing a single type descriptor and entries for all virtual dispatch methods.
 
 ```mlir
 moore.vtable @C$vtable {
-  entry @C::scale
-  entry @C::virtualTask
+  type_descriptor = @C$typeinfo
+  entries = [
+    @C::scale,          // slot 0
+    @C::virtualTask     // slot 1
+  ]
+}
+```
+
+where the type_descriptor contains a pointer to the class name, pointer to the inherited class type (null for roots), a bitmask for flags (abstract, interfaces, virtual base, etc.).
+
+``` mlir
+%typeinfo.C = type {
+  ptr @.typename.C,        ; mangled class name
+  ptr @C$base,             ; pointer to base typeinfo (null for roots)
+  i32 %flags,              ; bitmask (abstract, interface, virtual base, etc.)
 }
 ```
 
@@ -383,8 +419,149 @@ A derived class copies and overwrites base entries.
 
 During lowering:
 * `moore.class.vcall` -> (load vptr -> gep slot -> indirect llvm.call)
-* `super` calls -> direct call to base implementation (moore.class.method.call).
 
+# 14.1 VTable Layout and RTTI Integration — Full Example
+
+The following example demonstrates how vtables, RTTI, and inheritance interact in the Moore class model.
+
+## Example Source (SystemVerilog)
+
+```systemverilog
+virtual class Base;
+  int x;
+  function new(int v);
+    x = v;
+  endfunction
+
+  virtual function int f();
+    return x + 1;
+  endfunction
+endclass
+
+class Derived extends Base;
+  function new(int v);
+    super.new(v);
+  endfunction
+
+  function int f();
+    return x + 10;
+  endfunction
+endclass
+
+function int top();
+  Base b;
+  Derived d;
+  int r1, r2;
+
+  d = new(32);
+  b = d;             // upcast
+  r1 = b.f();        // virtual call
+  if ($cast(Derived'(b), d))  // dynamic cast
+    r2 = d.f();
+  return r1 + r2;
+endfunction
+```
+
+## Example Source (Moore Class Dialect)
+
+``` mlir
+// Base class metadata
+moore.class @Base {
+  fields { %x: !moore.i32 }
+  methods {
+    @Base::f : virtual,
+    @Base$ctor : constructor
+  }
+}
+
+// Derived class metadata
+moore.class @Derived extends @Base {
+  methods {
+    @Derived::f : overrides @Base::f,
+    @Derived$ctor : constructor
+  }
+}
+
+//
+// RTTI Records
+//
+moore.rtti @Base$typeinfo {
+  name = "Base",
+  base = null,
+  flags = #moore.class_flags<virtual>
+}
+
+moore.rtti @Derived$typeinfo {
+  name = "Derived",
+  base = @Base$typeinfo,
+  flags = #moore.class_flags<virtual>
+}
+
+//
+// VTables
+//
+moore.vtable @Base$vtable {
+  type_descriptor = @Base$typeinfo
+  entries = [ @Base::f ]
+}
+
+moore.vtable @Derived$vtable {
+  type_descriptor = @Derived$typeinfo
+  entries = [ @Derived::f ] // overrides Base::f in slot 0
+}
+
+//
+// Method Implementations
+//
+// Base::f
+func.func private @Base::f(%this: !moore.class<@Base>) -> !moore.i32 {
+  %xref = moore.class.field_ref %this, @Base::x : <i32>
+  %x = moore.read %xref : <i32>
+  %add = moore.add %x, (moore.constant 1 : i32) : i32
+  func.return %add : i32
+}
+
+// Derived::f (overrides)
+func.func private @Derived::f(%this: !moore.class<@Derived>) -> !moore.i32 {
+  %xref = moore.class.field_ref %this, @Base::x : <i32>
+  %x = moore.read %xref : <i32>
+  %add = moore.add %x, (moore.constant 10 : i32) : i32
+  func.return %add : i32
+}
+
+// top() function demonstrating upcast, vcall, and downcast
+func.func private @top() -> !moore.i32 {
+  %c32 = moore.constant 32 : i32
+
+  // d = new(32)
+  %d = moore.class.new @Derived(%c32) : (!moore.i32) -> !moore.class<@Derived>
+
+  // b = d (implicit upcast)
+  %b = moore.class.upcast %d : !moore.class<@Derived> to !moore.class<@Base>
+
+  // r1 = b.f()  (virtual dispatch)
+  %r1 = moore.class.vcall @Base::f(%b) : (!moore.class<@Base>) -> !moore.i32
+
+  // if ($cast(Derived'(b), d))
+  %d2 = moore.class.downcast %b : !moore.class<@Base> to !moore.class<@Derived>
+  %isvalid = moore.class.isnull %d2
+  %notnull = moore.not %isvalid : i1
+  // Branch on successful cast
+  cf.cond_br %cond, ^then, ^else
+
+^then:
+  %r2 = moore.class.call @Derived::f(%d2)
+          : (!moore.class<@Derived>) -> !moore.i32
+  %sum_then = moore.add %r1, %r2 : i32
+  cf.br ^merge(%sum_then : i32)
+
+^else:
+  cf.br ^merge(%r1 : i32)
+
+^merge(%res: i32):
+  func.return %res : i32
+}
+```
 
 # 15. Abstract Classes and Pure Virtual Methods
 
