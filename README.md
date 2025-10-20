@@ -293,12 +293,13 @@ moore.module @top {
 
 | Moore Op | LLVM Lowering |
 |-----------|----------------|
-| `class.new` | `malloc` + optional ctor call |
-| `class.delete` | call dtor + `free` |
-| `class.field_ref` | `llvm.getelementptr` |
-| `class.method.call` | direct `llvm.call` |
-| `class.vcall` | load vptr, GEP to slot, indirect `llvm.call` |
-| `upcast` | bitcast |
+| `moore.class.new` | `malloc` + optional ctor call |
+| `moore.class.delete` | call dtor + `free` |
+| `moore.class.field_ref` | `llvm.getelementptr` |
+| `moore.class.method.call` | direct `llvm.call` |
+| `moore.class.vcall` | load vptr, GEP to slot, indirect `llvm.call` |
+| `moore.class.upcast` | bitcast |
+| `moore.class.downcast` | See [The dynamic_cast algorithm](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#dynamic_cast-algorithm) |
 
 # 9. Naming and Visibility
 
