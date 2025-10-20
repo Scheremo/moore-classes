@@ -759,6 +759,7 @@ Together, these notes define the broader technical envelope for class support in
 | Randomization (out of scope) | § 18 “Random stability and constraints” |
 
 [^8]: IEEE 1800-2023 § 8 “Classes”
+[^8.5]: IEEE 1800-2023 § 8.5 “Object properties and object parameter data”
 [^8.6]: IEEE 1800-2023 § 8.6 “Class members”
 [^8.7]: IEEE 1800-2023 § 8.7 “Constructors”
 [^8.8]: IEEE 1800-2023 § 8.8 “this handle”
